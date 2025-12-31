@@ -1,0 +1,13 @@
+nohup: ignoring input
+Using provided account address: XXK264WAX6D5LOU5OUSNCO5MDEH6RKQNRENHGGHDS43Q2STN2DYFEFWDGY
+Ensure this address is funded on testnet.
+ * Serving Flask app 'app'
+ * Debug mode: on
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://127.0.0.1:5000
+Press CTRL+C to quit
+ * Restarting with stat
+ * Debugger is active!
+ * Debugger PIN: 675-642-770
+127.0.0.1 - - [31/Dec/2025 02:47:23] "POST /chat HTTP/1.1" 200 -
+127.0.0.1 - - [31/Dec/2025 02:47:42] "POST /chat HTTP/1.1" 200 -
