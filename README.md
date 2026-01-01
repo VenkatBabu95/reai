@@ -13,7 +13,7 @@ A trustworthy, blockchain-backed AI medical assistant that provides responsible 
 
 ### Architecture
 - **Backend**: Python Flask web application
-- **AI Engine**: Custom rule-based system with similarity matching for learning
+- **AI Engine**: Custom rule-based system augmented with embedding-based semantic search for improved matching and learning
 - **Blockchain**: Algorand testnet for immutable data storage and retrieval
 - **Frontend**: Simple HTML/CSS chat interface
 
@@ -111,6 +111,8 @@ The AI provides guidance for:
 - Flask: Web framework
 - py-algorand-sdk: Blockchain integration
 - difflib: Similarity matching for learning
+- sentence-transformers + torch: Embedding-based semantic search for improved matching
+- numpy: Numerical operations for embeddings
 
 ### API Endpoints
 - `GET /`: Chat interface

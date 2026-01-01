@@ -2,6 +2,13 @@ from flask import Flask, request, jsonify, render_template
 import algosdk
 import hashlib
 import json
+from model import (
+    find_similar_by_embedding, load_model, train_model_on_batch, 
+    get_model_info, get_blockchain_stats,
+    propose_training_to_consensus, approve_training_proposal, apply_consensus_training
+)
+from blockchain import blockchain
+from custom_model import custom_llm
 import os
 import difflib
 
@@ -122,6 +129,7 @@ def get_medical_advice(user_message, data):
 def index():
     return render_template('index.html')
 
+
 @app.route('/chat', methods=['POST'])
 def chat():
     user_message = request.json['message']
@@ -129,24 +137,51 @@ def chat():
     # Load data from blockchain
     data = load_data_from_blockchain()
     
-    # Generate AI response using custom learning medical assistant
+    # Train model on this query and mine block
     try:
-        ai_response = get_medical_advice(user_message, data)
+        train_result = train_model_on_batch([user_message], labels=[1], learning_rate=0.01)
+        blockchain.mine_block(miner_id='medical-assistant')
+    except Exception as e:
+        print(f"Model training error: {e}")
+    
+    # Attempt to use embedding-based similarity first (faster/more robust matching)
+    try:
+        # Ensure model is loaded (lazy load)
+        try:
+            load_model()
+        except Exception as e:
+            print(f"Warning: model failed to load at import time: {e}")
+
+        found = None
+        try:
+            found = find_similar_by_embedding(user_message, data)
+        except Exception as e:
+            print(f"Embedding lookup failed: {e}")
+
+        if found:
+            # found is (response, score)
+            ai_response = found[0]
+        else:
+            ai_response = get_medical_advice(user_message, data)
+
         # Add disclaimer
         ai_response += "\n\nDisclaimer: This is general information. Please consult a healthcare professional for medical advice."
-        
-        # Prepare data for blockchain storage
+
+        # Prepare data for blockchain storage including response hash
+        response_hash = hashlib.sha256(ai_response.encode()).hexdigest()
         interaction_data = {
             "query": user_message,
-            "response": ai_response
+            "response": ai_response,
+            "hash": response_hash
         }
         note = json.dumps(interaction_data).encode('utf-8')
         
         # If note is too long, store hash instead
         if len(note) > 1000:
-            note = hashlib.sha256(ai_response.encode()).hexdigest().encode('utf-8')
+            note = response_hash.encode('utf-8')
     except Exception as e:
         ai_response = f"I apologize, but I'm experiencing technical difficulties: {str(e)}. Please consult a healthcare professional for medical advice."
+        response_hash = hashlib.sha256(ai_response.encode()).hexdigest()
         note = b"error"
     
     # Create a transaction to store the interaction on blockchain
@@ -164,9 +199,182 @@ def chat():
         txid = algod_client.send_transaction(signed_txn)
         # Wait for confirmation
         algosdk.transaction.wait_for_confirmation(algod_client, txid, 4)
-        return jsonify({'response': ai_response, 'txid': txid})
+        blockchain.mine_block(miner_id='blockchain-recorder')
+        
+        return jsonify({
+            'response': ai_response,
+            'txid': txid,
+            'hash': response_hash,
+            'model_info': get_model_info(),
+            'blockchain_stats': get_blockchain_stats()
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/model-info', methods=['GET'])
+def model_info():
+    """Get current model information and training status."""
+    return jsonify({
+        'model': get_model_info(),
+        'blockchain': get_blockchain_stats(),
+        'blockchain_chain_length': len(blockchain.get_chain())
+    })
+
+
+@app.route('/blockchain-history', methods=['GET'])
+def blockchain_history():
+    """Get blockchain transaction history."""
+    history = blockchain.get_model_history('custom-medical-llm-v1')
+    return jsonify({
+        'total_records': len(history),
+        'records': history[:50]  # Latest 50
+    })
+
+
+@app.route('/train', methods=['POST'])
+def train():
+    """Manual model training endpoint."""
+    data = request.json
+    texts = data.get('texts', [])
+    learning_rate = data.get('learning_rate', 0.01)
+    
+    if not texts:
+        return jsonify({'error': 'No texts provided'}), 400
+    
+    try:
+        metrics = train_model_on_batch(texts, learning_rate=learning_rate)
+        block_result = blockchain.mine_block(miner_id='training-endpoint')
+        
+        return jsonify({
+            'status': 'success',
+            'metrics': metrics,
+            'block': block_result,
+            'model_info': get_model_info()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/save-checkpoint', methods=['POST'])
+def save_checkpoint():
+    """Save model checkpoint to disk and blockchain."""
+    try:
+        checkpoint_hash = custom_llm.save_checkpoint('checkpoints/model_checkpoint.json')
+        block_result = blockchain.mine_block(miner_id='checkpoint-saver')
+        
+        return jsonify({
+            'status': 'success',
+            'checkpoint_hash': checkpoint_hash,
+            'block': block_result,
+            'model_info': get_model_info()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/decentralized/propose-training', methods=['POST'])
+def propose_training():
+    """Step 1: Propose training update to blockchain validators."""
+    data = request.json
+    texts = data.get('texts', [])
+    learning_rate = data.get('learning_rate', 0.01)
+    
+    if not texts:
+        return jsonify({'error': 'No texts provided'}), 400
+    
+    try:
+        result = propose_training_to_consensus(texts, learning_rate)
+        return jsonify({
+            'status': 'success',
+            'proposal': result,
+            'blockchain_stats': get_blockchain_stats()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/decentralized/approve-proposal', methods=['POST'])
+def approve_proposal():
+    """Step 2: Validator approves training proposal."""
+    data = request.json
+    proposal_hash = data.get('proposal_hash')
+    validator_id = data.get('validator_id', 'validator-' + os.urandom(4).hex())
+    
+    if not proposal_hash:
+        return jsonify({'error': 'proposal_hash required'}), 400
+    
+    try:
+        result = approve_training_proposal(proposal_hash, validator_id)
+        return jsonify({
+            'status': 'success',
+            'approval': result,
+            'blockchain_stats': get_blockchain_stats()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/decentralized/apply-training', methods=['POST'])
+def apply_training():
+    """Step 3: Apply consensus-approved training to model."""
+    data = request.json
+    proposal_hash = data.get('proposal_hash')
+    texts = data.get('texts', [])
+    learning_rate = data.get('learning_rate', 0.01)
+    
+    if not proposal_hash or not texts:
+        return jsonify({'error': 'proposal_hash and texts required'}), 400
+    
+    try:
+        metrics = apply_consensus_training(proposal_hash, texts, learning_rate)
+        
+        if metrics.get('status') == 'failed':
+            return jsonify({'error': metrics.get('reason')}), 403
+        
+        return jsonify({
+            'status': 'success',
+            'metrics': metrics,
+            'model_info': get_model_info(),
+            'blockchain_stats': get_blockchain_stats()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/decentralized/status', methods=['GET'])
+def decentralized_status():
+    """Get decentralized ML training status."""
+    chain = blockchain.get_chain()
+    pending = len(blockchain.pending_records)
+    
+    # Count proposals and approvals
+    proposals = 0
+    approvals = 0
+    updates = 0
+    
+    for block in chain:
+        for record in block.get('records', []):
+            if record['type'] == 'training_proposal':
+                proposals += 1
+            elif record['type'] == 'validator_approval':
+                approvals += 1
+            elif record['type'] == 'model_update_approved':
+                updates += 1
+    
+    return jsonify({
+        'blockchain': get_blockchain_stats(),
+        'model': get_model_info(),
+        'decentralized_stats': {
+            'total_proposals': proposals,
+            'total_approvals': approvals,
+            'applied_updates': updates,
+            'pending_records': pending
+        },
+        'consensus_required': True,
+        'validators_required': 1
+    })
+
 
 if __name__ == '__main__':
     app.run(debug=True)
