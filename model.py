@@ -103,6 +103,63 @@ def apply_consensus_training(proposal_hash: str, texts: List[str], learning_rate
     return metrics
 
 
+def build_dataset_from_chain(limit: int = 500, filter_pii: bool = True):
+    """Build a training dataset from on-chain `query_inference` records.
+
+    - Returns list of text queries (deduplicated, most recent first)
+    - `filter_pii` removes queries containing simple PII keywords
+    """
+    pii_keywords = ['name', 'ssn', 'social', 'address', 'phone', 'email']
+    texts = []
+    seen = set()
+    # Search mined blocks and pending records
+    for block in reversed(blockchain.get_chain()):
+        for record in reversed(block.get('records', [])):
+            if record.get('type') == 'query_inference':
+                q = record['data'].get('query', '').strip()
+                if not q:
+                    continue
+                key = q.lower()
+                if key in seen:
+                    continue
+                if filter_pii and any(k in key for k in pii_keywords):
+                    continue
+                texts.append(q)
+                seen.add(key)
+                if len(texts) >= limit:
+                    return texts
+    # Also include pending records
+    for record in blockchain.pending_records:
+        if record.get('type') == 'query_inference':
+            q = record['data'].get('query', '').strip()
+            key = q.lower()
+            if key not in seen and (not filter_pii or not any(k in key for k in pii_keywords)):
+                texts.append(q)
+                seen.add(key)
+                if len(texts) >= limit:
+                    break
+
+    return texts
+
+
+def propose_train_from_chain(limit: int = 200, learning_rate: float = 0.01, filter_pii: bool = True):
+    """Helper: build dataset from chain and propose training to validators."""
+    texts = build_dataset_from_chain(limit=limit, filter_pii=filter_pii)
+    if not texts:
+        return {'status': 'no_data', 'message': 'No suitable on-chain records found'}
+    return propose_training_to_consensus(texts, learning_rate=learning_rate)
+
+
+def apply_consensus_training_with_dp(proposal_hash: str, texts: List[str], learning_rate: float = 0.01, dp_params: dict = None):
+    """Apply training with differential privacy parameters after consensus."""
+    if not USE_CUSTOM_LLM:
+        return {'status': 'error', 'message': 'Only custom LLM supports decentralized training'}
+    metrics = custom_llm.apply_approved_training(proposal_hash, texts, learning_rate=learning_rate, dp_params=dp_params)
+    if USE_BLOCKCHAIN_LOGGING:
+        blockchain.mine_block(miner_id='training-executor-dp')
+    return metrics
+
+
 def find_similar_by_embedding(user_message, data, threshold: float = 0.65):
     """Find similar responses using embeddings with blockchain logging."""
     if not data:

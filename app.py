@@ -5,7 +5,8 @@ import json
 from model import (
     find_similar_by_embedding, load_model, train_model_on_batch, 
     get_model_info, get_blockchain_stats,
-    propose_training_to_consensus, approve_training_proposal, apply_consensus_training
+    propose_training_to_consensus, approve_training_proposal, apply_consensus_training,
+    propose_train_from_chain, apply_consensus_training_with_dp
 )
 from blockchain import blockchain
 from custom_model import custom_llm
@@ -294,6 +295,21 @@ def propose_training():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/decentralized/propose-from-chain', methods=['POST'])
+def propose_from_chain():
+    """Build dataset from on-chain records and propose training."""
+    data = request.json or {}
+    limit = int(data.get('limit', 200))
+    learning_rate = float(data.get('learning_rate', 0.01))
+    filter_pii = bool(data.get('filter_pii', True))
+
+    try:
+        result = propose_train_from_chain(limit=limit, learning_rate=learning_rate, filter_pii=filter_pii)
+        return jsonify({'status': 'success', 'proposal': result, 'blockchain_stats': get_blockchain_stats()})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/decentralized/approve-proposal', methods=['POST'])
 def approve_proposal():
     """Step 2: Validator approves training proposal."""
@@ -327,11 +343,15 @@ def apply_training():
         return jsonify({'error': 'proposal_hash and texts required'}), 400
     
     try:
-        metrics = apply_consensus_training(proposal_hash, texts, learning_rate)
-        
+        dp_params = data.get('dp_params') if isinstance(data, dict) else None
+        if dp_params:
+            metrics = apply_consensus_training_with_dp(proposal_hash, texts, learning_rate, dp_params=dp_params)
+        else:
+            metrics = apply_consensus_training(proposal_hash, texts, learning_rate)
+
         if metrics.get('status') == 'failed':
             return jsonify({'error': metrics.get('reason')}), 403
-        
+
         return jsonify({
             'status': 'success',
             'metrics': metrics,

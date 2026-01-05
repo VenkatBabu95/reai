@@ -7,7 +7,8 @@ import json
 import hashlib
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
+import os
 from blockchain import blockchain
 
 
@@ -88,6 +89,82 @@ class CustomMedicalLLM:
         })
         
         return batch_metrics
+
+    def train_with_dp(self, texts: List[str], labels: List[int] = None,
+                      learning_rate: float = 0.01, clipping_norm: float = 1.0,
+                      noise_scale: float = 0.01):
+        """Train with a simple differential privacy mechanism.
+
+        - Clips per-example updates by `clipping_norm` and adds Gaussian noise
+        - Logs metrics to blockchain as `model_training_dp`
+        """
+        if labels is None:
+            labels = [0] * len(texts)
+
+        batch_metrics = {
+            'batch_size': len(texts),
+            'learning_rate': learning_rate,
+            'clipping_norm': clipping_norm,
+            'noise_scale': noise_scale,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+
+        vocab_before = len(self.vocab)
+
+        # Per-example updates, then aggregate with noise
+        aggregated_updates: Dict[str, np.ndarray] = {}
+        for text, label in zip(texts, labels):
+            words = self._preprocess_text(text)
+            # compute per-example update vector (mock gradients)
+            example_updates: Dict[str, np.ndarray] = {}
+            for word in words:
+                if word not in self.vocab:
+                    idx = len(self.vocab)
+                    self.vocab[word] = idx
+                    self.word_to_idx[word] = idx
+                    self.idx_to_word[idx] = word
+                    self.embeddings[word] = np.random.randn(self.embedding_dim) * 0.1
+                # mock gradient
+                grad = learning_rate * np.random.randn(self.embedding_dim) * 0.01
+                example_updates[word] = grad
+
+            # Clip example update norm
+            total_norm = np.sqrt(sum(np.linalg.norm(v) ** 2 for v in example_updates.values()))
+            if total_norm > clipping_norm and total_norm > 0:
+                scale = clipping_norm / (total_norm + 1e-12)
+                for k in example_updates:
+                    example_updates[k] = example_updates[k] * scale
+
+            # Accumulate
+            for k, v in example_updates.items():
+                aggregated_updates.setdefault(k, np.zeros(self.embedding_dim))
+                aggregated_updates[k] += v
+
+        # Add noise and apply updates
+        for word, update in aggregated_updates.items():
+            noise = np.random.normal(0, noise_scale, size=self.embedding_dim)
+            self.embeddings[word] += update + noise
+
+        vocab_after = len(self.vocab)
+        batch_metrics['vocab_before'] = vocab_before
+        batch_metrics['vocab_after'] = vocab_after
+        batch_metrics['new_words'] = vocab_after - vocab_before
+
+        model_hash_before = self.model_hash
+        self.model_hash = self._compute_model_hash()
+        batch_metrics['model_hash_before'] = model_hash_before
+        batch_metrics['model_hash_after'] = self.model_hash
+
+        self.training_history.append(batch_metrics)
+
+        # Log DP training to blockchain
+        blockchain.add_record('model_training_dp', {
+            'model_name': self.model_name,
+            'model_version': self.version,
+            'batch_metrics': batch_metrics
+        })
+
+        return batch_metrics
     
     def encode(self, texts: List[str]) -> np.ndarray:
         """Encode texts using learned embeddings."""
@@ -136,6 +213,26 @@ class CustomMedicalLLM:
         })
         
         return checkpoint_hash
+
+    def save_checkpoint_to_ipfs(self, path: str = 'checkpoints/model_checkpoint.json') -> str:
+        """Save checkpoint and return a simulated IPFS hash (sha256 of file)."""
+        checkpoint_hash = self.save_checkpoint(path)
+        # Compute file hash (simulate IPFS content hash)
+        with open(path, 'rb') as f:
+            data = f.read()
+        ipfs_hash = hashlib.sha256(data).hexdigest()
+
+        # Log IPFS record to blockchain
+        blockchain.add_record('model_checkpoint_ipfs', {
+            'model_name': self.model_name,
+            'model_version': self.version,
+            'checkpoint_path': path,
+            'ipfs_hash': ipfs_hash,
+            'model_hash': self.model_hash,
+            'vocab_size': len(self.vocab)
+        })
+
+        return ipfs_hash
     
     def load_checkpoint(self, path: str):
         """Load model from checkpoint."""
@@ -189,58 +286,37 @@ class CustomMedicalLLM:
         return proposal_hash
     
     def apply_approved_training(self, proposal_hash: str, texts: List[str], 
-                               labels: List[int] = None, learning_rate: float = 0.01):
+                               labels: List[int] = None, learning_rate: float = 0.01,
+                               dp_params: Optional[Dict] = None):
         """Apply training only if blockchain has validated it."""
         # Verify blockchain approves this update
         if not blockchain.validate_model_update(proposal_hash):
             return {'status': 'failed', 'reason': 'Not approved by validators'}
         
-        # Apply the training
-        if labels is None:
-            labels = [0] * len(texts)
-        
-        batch_metrics = {
-            'batch_size': len(texts),
-            'learning_rate': learning_rate,
-            'timestamp': datetime.utcnow().isoformat(),
-            'proposal_hash': proposal_hash,
-            'consensus_required': True
-        }
-        
-        vocab_before = len(self.vocab)
-        for text, label in zip(texts, labels):
-            words = self._preprocess_text(text)
-            for word in words:
-                if word not in self.vocab:
-                    idx = len(self.vocab)
-                    self.vocab[word] = idx
-                    self.word_to_idx[word] = idx
-                    self.idx_to_word[idx] = word
-                    self.embeddings[word] = np.random.randn(self.embedding_dim) * 0.1
-                else:
-                    self.embeddings[word] += learning_rate * np.random.randn(self.embedding_dim) * 0.01
-        
-        vocab_after = len(self.vocab)
-        batch_metrics['vocab_before'] = vocab_before
-        batch_metrics['vocab_after'] = vocab_after
-        batch_metrics['new_words'] = vocab_after - vocab_before
-        
-        model_hash_before = self.model_hash
-        self.model_hash = self._compute_model_hash()
-        batch_metrics['model_hash_before'] = model_hash_before
-        batch_metrics['model_hash_after'] = self.model_hash
-        
-        self.training_history.append(batch_metrics)
-        
+        # Apply the training (support DP when dp_params provided)
+        if dp_params:
+            clipping_norm = dp_params.get('clipping_norm', 1.0)
+            noise_scale = dp_params.get('noise_scale', 0.01)
+            metrics = self.train_with_dp(texts, labels, learning_rate, clipping_norm, noise_scale)
+            metrics['proposal_hash'] = proposal_hash
+            metrics['consensus_required'] = True
+        else:
+            # Non-DP fallback: existing behavior
+            if labels is None:
+                labels = [0] * len(texts)
+            metrics = self.train_on_batch(texts, labels, learning_rate)
+            metrics['proposal_hash'] = proposal_hash
+            metrics['consensus_required'] = True
+
         # Log approved update to blockchain
         blockchain.add_record('model_update_approved', {
             'model_name': self.model_name,
             'model_version': self.version,
             'proposal_hash': proposal_hash,
-            'metrics': batch_metrics
+            'metrics': metrics
         })
-        
-        return batch_metrics
+
+        return metrics
 
 
 # Global custom LLM instance
